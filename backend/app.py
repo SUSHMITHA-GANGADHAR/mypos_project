@@ -2,7 +2,7 @@ import os
 # GLOBAL TIMEOUT OVERRIDE (Must be before any httpx/supabase imports)
 os.environ["HTTPX_TIMEOUT"] = "60.0"
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from supabase import create_client
 from config import Config
@@ -13,15 +13,30 @@ import httpx
 
 # Robust static folder path for deployment
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-FRONTEND_DIR = os.path.join(os.path.dirname(BASE_DIR), 'frontend')
+# Check if we are inside 'backend' folder
+if os.path.basename(BASE_DIR) == 'backend':
+    PROJECT_ROOT = os.path.dirname(BASE_DIR)
+else:
+    PROJECT_ROOT = BASE_DIR
+
+FRONTEND_DIR = os.path.join(PROJECT_ROOT, 'frontend')
+
+print(f"DEBUG: BASE_DIR: {BASE_DIR}")
+print(f"DEBUG: PROJECT_ROOT: {PROJECT_ROOT}")
+print(f"DEBUG: FRONTEND_DIR: {FRONTEND_DIR}")
+print(f"DEBUG: FRONTEND_DIR exists: {os.path.exists(FRONTEND_DIR)}")
 
 app = Flask(__name__, 
             static_folder=FRONTEND_DIR, 
-            static_url_path='')
+            static_url_path='/') # Use '/' instead of '' for better root serving
 
 # Use WhiteNoise to serve static files reliably in production (e.g., Render)
-from whitenoise import WhiteNoise
-app.wsgi_app = WhiteNoise(app.wsgi_app, root=FRONTEND_DIR)
+try:
+    from whitenoise import WhiteNoise
+    app.wsgi_app = WhiteNoise(app.wsgi_app, root=FRONTEND_DIR)
+    print("✅ WhiteNoise initialized successfully")
+except ImportError:
+    print("⚠️ WhiteNoise not found, falling back to Flask static serving")
 
 app.config.from_object(Config)
 CORS(app)
@@ -146,14 +161,22 @@ def token_required(f):
         return f(current_user, *args, **kwargs)
     return decorated
 
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "healthy", "database": "connected" if connected else "failed"}), 200
+
 @app.route('/')
 def index():
-    return app.send_static_file('index.html')
-
-# Serve other HTML files directly
-@app.route('/<path:path>.html')
-def serve_html(path):
-    return app.send_static_file(path + '.html')
+    try:
+        # Check if index.html exists in FRONTEND_DIR
+        index_path = os.path.join(FRONTEND_DIR, 'index.html')
+        if os.path.exists(index_path):
+            return send_from_directory(FRONTEND_DIR, 'index.html')
+        else:
+            return f"Error: index.html not found at {index_path}. Current DIR: {os.getcwd()}", 404
+    except Exception as e:
+        print(f"❌ Error serving index.html: {e}")
+        return str(e), 500
 
 # --- Auth Routes ---
 @app.route('/api/auth/login', methods=['POST'])
@@ -529,6 +552,25 @@ def add_customer():
     except Exception as e:
         return jsonify({"status": "error", "message": str(e)}), 400
 
+# Catch-all route for other static files or frontend routing
+# THIS MUST BE AT THE BOTTOM to avoid intercepting /api/ routes
+@app.route('/<path:path>')
+def serve_any_file(path):
+    try:
+        # If path contains a dot (like style.css or dashboard.html), try to serve as file
+        if '.' in path:
+            return send_from_directory(FRONTEND_DIR, path)
+        # Otherwise, check if path.html exists
+        target_html = f"{path}.html"
+        if os.path.exists(os.path.join(FRONTEND_DIR, target_html)):
+            return send_from_directory(FRONTEND_DIR, target_html)
+        # Default to index for "spa-like" behavior
+        return send_from_directory(FRONTEND_DIR, 'index.html')
+    except Exception:
+        return send_from_directory(FRONTEND_DIR, 'index.html')
+
 if __name__ == '__main__':
     app.run(port=5000)
+
+
 
